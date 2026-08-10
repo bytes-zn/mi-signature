@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# uv
+.python-version
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Tests / coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Data / runtime
+data/
+celerybeat-schedule
+certs/
+logs/
+
+# Local tooling (downloaded binaries)
+.tools/

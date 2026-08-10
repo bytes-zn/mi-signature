@@ -1,0 +1,107 @@
+name: bytes-signature-service
+
+x-app-env: &app-env
+  ENVIRONMENT: development
+  LOG_FORMAT: console
+  LOG_LEVEL: INFO
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-signature}:${POSTGRES_PASSWORD:-signature}@db:5432/${POSTGRES_DB:-signature}
+  REDIS_URL: redis://redis:6379/0
+  RESEND_API_KEY: ${RESEND_API_KEY:-}
+  SMTP_OUTBOUND_DEFAULT_HOST: ${SMTP_OUTBOUND_DEFAULT_HOST:-}
+  SMTP_OUTBOUND_PORT: ${SMTP_OUTBOUND_PORT:-25}
+  SMTP_OUTBOUND_STARTTLS: ${SMTP_OUTBOUND_STARTTLS:-true}
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-signature}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-signature}
+      POSTGRES_DB: ${POSTGRES_DB:-signature}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment: *app-env
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build: .
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment: *app-env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status in (200,503) else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build: .
+    command: ["celery", "-A", "app.jobs.celery_app", "worker", "--loglevel=INFO"]
+    environment: *app-env
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  scheduler:
+    build: .
+    command: ["celery", "-A", "app.jobs.celery_app", "beat", "--loglevel=INFO", "--schedule", "/tmp/celerybeat-schedule"]
+    environment: *app-env
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  smtp:
+    build: .
+    command: ["python", "-m", "app.mailer.smtp_server"]
+    environment:
+      <<: *app-env
+      # The container process runs as the non-root "app" user and therefore
+      # listens on 2525; Docker maps the public SMTP port to it.
+      SMTP_INBOUND_HOST: 0.0.0.0
+      SMTP_INBOUND_PORT: 2525
+      SMTP_INBOUND_TLS_CERTFILE: ${SMTP_INBOUND_TLS_CERTFILE:-/certs/fullchain.pem}
+      SMTP_INBOUND_TLS_KEYFILE: ${SMTP_INBOUND_TLS_KEYFILE:-/certs/privkey.pem}
+      SMTP_INBOUND_REQUIRE_TLS: ${SMTP_INBOUND_REQUIRE_TLS:-true}
+      SMTP_ALLOWED_HOSTS: ${SMTP_ALLOWED_HOSTS:-}
+    ports:
+      - "${SMTP_PUBLIC_PORT:-25}:2525"
+    volumes:
+      - ${SMTP_CERT_DIR:-./certs}:/certs:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
