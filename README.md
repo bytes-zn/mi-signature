@@ -21,21 +21,21 @@ reply-safe signature placement.
      ▼
 ┌─────────────────────────────────────────────────────────┐
 │ Microsoft 365 (Exchange Online)                         │
-│  Transport rule "Signature"  ──2──►  Outbound Connector   │
+│  Transport rule "Signature"  ──2──►  Outbound Connector │
 └──────────────────────────────────────┬──────────────────┘
-                                        ▼  SMTP + STARTTLS, Port 25
+                                       ▼  SMTP + STARTTLS, Port 25
 ┌─────────────────────────────────────────────────────────┐
 │ MI Signature (this server)                              │
-│  3. Recognize tenant by sender domain                    │
-│  4. Resolve user from directory (Graph sync)              │
-│  5. Rule → select template, check campaign                │
-│  6. Insert signature directly under the new text         │
-│     (before the quoted history)                           │
+│  3. Recognize tenant by sender domain                   │
+│  4. Resolve user from directory (Graph sync)            │
+│  5. Rule → select template, check campaign              │
+│  6. Insert signature directly under the new text        │
+│     (before the quoted history)                         │
 └──────────────────────────────────────┬──────────────────┘
-                                        ▼  SMTP + STARTTLS, Port 25
+                                       ▼  SMTP + STARTTLS, Port 25
 ┌─────────────────────────────────────────────────────────┐
 │ Microsoft 365 — Inbound Connector (Partner Organization)│
-│  7. Delivery to the recipient                            │
+│  7. Delivery to the recipient                           │
 └─────────────────────────────────────────────────────────┘
 ```
 
