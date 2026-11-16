@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_session
+from app.audit.dependencies import AuditDep
 from app.auth.api_key import Caller, get_caller
 from app.core.exceptions import ValidationError
 from app.core.user_context import UserContext
@@ -41,10 +42,21 @@ def _scope(caller: Caller, tenant_id: uuid.UUID | None) -> uuid.UUID:
 
 
 @router.post("", response_model=RuleRead, status_code=status.HTTP_201_CREATED)
-async def create_rule(data: RuleCreate, caller: CallerDep, service: ServiceDep) -> RuleRead:
+async def create_rule(
+    data: RuleCreate, caller: CallerDep, service: ServiceDep, audit: AuditDep
+) -> RuleRead:
     """Create a rule. Conditions are validated against the user contract."""
     tenant_id = _scope(caller, data.tenant_id)
     rule = await service.create_rule(tenant_id, data)
+    await audit.record(
+        "rule.created",
+        actor_type=caller.actor_type,
+        actor_id=caller.actor_id,
+        tenant_id=tenant_id,
+        target_type="rule",
+        target_id=str(rule.id),
+        details={"name": rule.name},
+    )
     return RuleRead.model_validate(rule)
 
 
@@ -91,17 +103,40 @@ async def get_rule(rule_id: uuid.UUID, caller: CallerDep, service: ServiceDep) -
 
 @router.put("/{rule_id}", response_model=RuleRead)
 async def update_rule(
-    rule_id: uuid.UUID, data: RuleUpdate, caller: CallerDep, service: ServiceDep
+    rule_id: uuid.UUID,
+    data: RuleUpdate,
+    caller: CallerDep,
+    service: ServiceDep,
+    audit: AuditDep,
 ) -> RuleRead:
     rule = await service.get_rule(rule_id)
     caller.ensure_tenant_access(rule.tenant_id)
     updated = await service.update_rule(rule.tenant_id, rule_id, data)
+    await audit.record(
+        "rule.updated",
+        actor_type=caller.actor_type,
+        actor_id=caller.actor_id,
+        tenant_id=rule.tenant_id,
+        target_type="rule",
+        target_id=str(rule_id),
+        details={"fields": sorted(data.model_dump(exclude_none=True).keys())},
+    )
     return RuleRead.model_validate(updated)
 
 
 @router.delete("/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_rule(rule_id: uuid.UUID, caller: CallerDep, service: ServiceDep) -> Response:
+async def delete_rule(
+    rule_id: uuid.UUID, caller: CallerDep, service: ServiceDep, audit: AuditDep
+) -> Response:
     rule = await service.get_rule(rule_id)
     caller.ensure_tenant_access(rule.tenant_id)
     await service.delete_rule(rule.tenant_id, rule_id)
+    await audit.record(
+        "rule.deleted",
+        actor_type=caller.actor_type,
+        actor_id=caller.actor_id,
+        tenant_id=rule.tenant_id,
+        target_type="rule",
+        target_id=str(rule_id),
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

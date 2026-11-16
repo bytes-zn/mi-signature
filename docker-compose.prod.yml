@@ -1,0 +1,36 @@
+# Production overrides.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# The production baseline refuses to start with an insecure configuration,
+# so OPERATOR_API_KEY, SECRET_ENCRYPTION_KEY and SMTP_ALLOWED_HOSTS have to
+# be set in the environment (see .env.example and 'make secrets').
+
+services:
+  api:
+    environment:
+      ENVIRONMENT: production
+      LOG_FORMAT: json
+      LOG_LEVEL: INFO
+      API_DOCS_ENABLED: "false"
+      # The API is only reachable from the TLS terminator on the host.
+      API_BIND: "127.0.0.1"
+      HTTPS_REDIRECT: "true"
+
+  worker:
+    environment:
+      ENVIRONMENT: production
+      LOG_FORMAT: json
+      LOG_LEVEL: INFO
+
+  scheduler:
+    environment:
+      ENVIRONMENT: production
+      LOG_FORMAT: json
+      LOG_LEVEL: INFO
+
+  smtp:
+    environment:
+      ENVIRONMENT: production
+      LOG_FORMAT: json
+      LOG_LEVEL: INFO

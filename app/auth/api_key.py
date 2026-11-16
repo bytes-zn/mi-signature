@@ -8,9 +8,10 @@ Two caller roles exist:
   may access only its own tenant resource (strict tenant isolation).
 """
 
+import hmac
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import Depends, Security
@@ -26,6 +27,10 @@ from app.models.api_key import ApiKey
 from app.models.tenant import Tenant
 
 API_KEY_HEADER = "X-API-Key"
+
+#: ``last_used_at`` is only written when it is older than this interval -
+#: otherwise every single API request would cause a database write.
+LAST_USED_WRITE_INTERVAL = timedelta(minutes=5)
 
 api_key_header = APIKeyHeader(name=API_KEY_HEADER, auto_error=False)
 
@@ -44,6 +49,18 @@ class Caller:
         if self.tenant is None or self.tenant.id != tenant_id:
             raise ForbiddenError("Access to this tenant is not allowed.", code="tenant_mismatch")
 
+    @property
+    def actor_type(self) -> str:
+        """Audit actor type of this caller."""
+        return "operator" if self.is_operator else "tenant"
+
+    @property
+    def actor_id(self) -> str | None:
+        """Audit actor id of this caller (``None`` for the operator)."""
+        if self.is_operator or self.tenant is None:
+            return None
+        return str(self.tenant.id)
+
 
 async def _resolve_tenant(session: AsyncSession, api_key: str) -> Tenant:
     """Resolve the tenant for a tenant API key or raise 401/403."""
@@ -61,8 +78,9 @@ async def _resolve_tenant(session: AsyncSession, api_key: str) -> Tenant:
     if tenant.status != "active":
         raise ForbiddenError("Tenant is not active.", code="tenant_inactive")
 
-    key.last_used_at = now
-    await session.commit()
+    if key.last_used_at is None or now - key.last_used_at > LAST_USED_WRITE_INTERVAL:
+        key.last_used_at = now
+        await session.commit()
     return tenant
 
 
@@ -74,7 +92,7 @@ async def get_caller(
     """Authenticate either as operator or as tenant."""
     if not api_key:
         raise UnauthorizedError("Missing API key.", code="missing_api_key")
-    if api_key == settings.operator_api_key:
+    if hmac.compare_digest(api_key, settings.operator_api_key):
         return Caller(tenant=None, is_operator=True)
     return Caller(tenant=await _resolve_tenant(session, api_key), is_operator=False)
 
@@ -96,5 +114,5 @@ def require_operator(
     """Require the platform operator key (from the environment)."""
     if not api_key:
         raise UnauthorizedError("Missing API key.", code="missing_api_key")
-    if api_key != settings.operator_api_key:
+    if not hmac.compare_digest(api_key, settings.operator_api_key):
         raise ForbiddenError("Operator privileges required.", code="operator_required")

@@ -1,11 +1,14 @@
 """Operational endpoints (unversioned): health and Prometheus metrics."""
 
+import hmac
 from typing import Any
 
 import structlog
 from fastapi import APIRouter, Request, Response, status
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
+
+from app.core.exceptions import UnauthorizedError
 
 router = APIRouter(tags=["ops"])
 
@@ -46,6 +49,21 @@ async def health(request: Request, response: Response) -> dict[str, Any]:
 
 
 @router.get("/metrics")
-async def metrics() -> Response:
-    """Expose Prometheus metrics."""
+async def metrics(request: Request) -> Response:
+    """Expose Prometheus metrics.
+
+    The endpoint is protected with ``METRICS_TOKEN`` when one is configured:
+    the token is sent either as ``X-Metrics-Token`` header or as
+    ``Authorization: Bearer <token>``.
+    """
+    settings = request.app.state.settings
+    token = settings.metrics_token
+    if token:
+        provided = request.headers.get("X-Metrics-Token", "")
+        authorization = request.headers.get("Authorization", "")
+        if authorization.lower().startswith("bearer "):
+            provided = provided or authorization[7:].strip()
+        if not hmac.compare_digest(provided, token):
+            raise UnauthorizedError("Invalid metrics token.", code="invalid_metrics_token")
+
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)

@@ -4,6 +4,7 @@ Targeting reuses the rule engine's condition tree and evaluator - there
 is deliberately no second condition implementation here.
 """
 
+import json
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -17,7 +18,7 @@ from app.campaigns.schemas import CampaignCreate, CampaignUpdate
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.user_context import UserContext
 from app.models.campaign import Campaign
-from app.rules.conditions import Condition
+from app.rules.conditions import Condition, parse_conditions
 from app.rules.engine import evaluate
 
 _condition_adapter: TypeAdapter[Condition] = TypeAdapter(Condition)
@@ -140,7 +141,7 @@ class CampaignService:
                 continue
             if campaign.conditions is None:
                 return campaign
-            condition = _condition_adapter.validate_python(campaign.conditions)
+            condition = parse_conditions(json.dumps(campaign.conditions, sort_keys=True))
             if evaluate(condition, user):
                 return campaign
         return None

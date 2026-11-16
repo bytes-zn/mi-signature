@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_session
+from app.audit.dependencies import AuditDep
 from app.auth.api_key import Caller, get_caller
 from app.campaigns.schemas import (
     CampaignCreate,
@@ -55,11 +56,20 @@ def _to_read(campaign: Campaign) -> CampaignRead:
 
 @router.post("", response_model=CampaignRead, status_code=status.HTTP_201_CREATED)
 async def create_campaign(
-    data: CampaignCreate, caller: CallerDep, service: ServiceDep
+    data: CampaignCreate, caller: CallerDep, service: ServiceDep, audit: AuditDep
 ) -> CampaignRead:
     """Create a time-boxed banner campaign."""
     tenant_id = _scope(caller, data.tenant_id)
     campaign = await service.create_campaign(tenant_id, data)
+    await audit.record(
+        "campaign.created",
+        actor_type=caller.actor_type,
+        actor_id=caller.actor_id,
+        tenant_id=tenant_id,
+        target_type="campaign",
+        target_id=str(campaign.id),
+        details={"name": campaign.name},
+    )
     return _to_read(campaign)
 
 
@@ -119,19 +129,40 @@ async def get_campaign(
 
 @router.put("/{campaign_id}", response_model=CampaignRead)
 async def update_campaign(
-    campaign_id: uuid.UUID, data: CampaignUpdate, caller: CallerDep, service: ServiceDep
+    campaign_id: uuid.UUID,
+    data: CampaignUpdate,
+    caller: CallerDep,
+    service: ServiceDep,
+    audit: AuditDep,
 ) -> CampaignRead:
     campaign = await service.get_campaign(campaign_id)
     caller.ensure_tenant_access(campaign.tenant_id)
     updated = await service.update_campaign(campaign.tenant_id, campaign_id, data)
+    await audit.record(
+        "campaign.updated",
+        actor_type=caller.actor_type,
+        actor_id=caller.actor_id,
+        tenant_id=campaign.tenant_id,
+        target_type="campaign",
+        target_id=str(campaign_id),
+        details={"fields": sorted(data.model_dump(exclude_none=True).keys())},
+    )
     return _to_read(updated)
 
 
 @router.delete("/{campaign_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_campaign(
-    campaign_id: uuid.UUID, caller: CallerDep, service: ServiceDep
+    campaign_id: uuid.UUID, caller: CallerDep, service: ServiceDep, audit: AuditDep
 ) -> Response:
     campaign = await service.get_campaign(campaign_id)
     caller.ensure_tenant_access(campaign.tenant_id)
     await service.delete_campaign(campaign.tenant_id, campaign_id)
+    await audit.record(
+        "campaign.deleted",
+        actor_type=caller.actor_type,
+        actor_id=caller.actor_id,
+        tenant_id=campaign.tenant_id,
+        target_type="campaign",
+        target_id=str(campaign_id),
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

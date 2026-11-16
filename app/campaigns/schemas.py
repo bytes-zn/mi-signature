@@ -4,9 +4,9 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.rules.conditions import Condition
+from app.rules.conditions import Condition, validate_condition_tree
 
 CampaignStatus = Literal["active", "inactive"]
 
@@ -48,6 +48,14 @@ class CampaignCreate(_TimeWindow):
     link_url: str | None = Field(default=None, max_length=2048)
     conditions: Condition | None = None
 
+    @field_validator("conditions")
+    @classmethod
+    def _check_conditions(cls, value: Condition | None) -> Condition | None:
+        """Reject unsafe regular expressions when the campaign is saved."""
+        if value is None:
+            return None
+        return validate_condition_tree(value)
+
 
 class CampaignUpdate(BaseModel):
     """Payload for updating a campaign (all fields optional)."""
@@ -62,6 +70,14 @@ class CampaignUpdate(BaseModel):
     banner_text: str | None = None
     link_url: str | None = Field(default=None, max_length=2048)
     conditions: Condition | None = None
+
+    @field_validator("conditions")
+    @classmethod
+    def _check_conditions(cls, value: Condition | None) -> Condition | None:
+        """Reject unsafe regular expressions when the campaign is saved."""
+        if value is None:
+            return None
+        return validate_condition_tree(value)
 
 
 class CampaignRead(BaseModel):

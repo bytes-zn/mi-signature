@@ -20,9 +20,10 @@ attributes are addressed as ``custom_attributes.<key>``.
 """
 
 import re
+from functools import lru_cache
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, TypeAdapter, field_validator
 
 from app.core.user_context import KNOWN_USER_VARIABLES
 
@@ -37,6 +38,37 @@ Operator = Literal[
 ]
 
 _CUSTOM_FIELD_PATTERN = re.compile(r"^custom_attributes\.[A-Za-z0-9_]+$")
+
+#: Maximum length of a regular expression used in a condition.
+MAX_REGEX_LENGTH = 200
+
+#: Nested quantifiers ("(a+)+") are the classic source of catastrophic
+#: backtracking. The rule engine runs synchronously in the mail path, so
+#: such a pattern would block the worker for every incoming message.
+_NESTED_QUANTIFIER = re.compile(r"\([^)]*[+*][^)]*\)\s*[+*]")
+
+
+def validate_regex_pattern(pattern: str) -> str:
+    """Validate a condition regex and return it unchanged.
+
+    Raises:
+        ValueError: if the pattern is invalid, too long or prone to
+            catastrophic backtracking.
+    """
+    if len(pattern) > MAX_REGEX_LENGTH:
+        raise ValueError(
+            f"Regular expression must not be longer than {MAX_REGEX_LENGTH} characters."
+        )
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise ValueError(f"Invalid regular expression: {exc}") from exc
+    if _NESTED_QUANTIFIER.search(pattern):
+        raise ValueError(
+            "Regular expression with nested quantifiers is not allowed "
+            "(risk of catastrophic backtracking)."
+        )
+    return pattern
 
 
 def validate_field_name(field: str) -> str:
@@ -88,3 +120,36 @@ Condition = Annotated[
 # Resolve forward references for the recursive model.
 ConditionGroup.model_rebuild()
 ConditionNot.model_rebuild()
+
+_condition_adapter: TypeAdapter[Condition] = TypeAdapter(Condition)
+
+
+def validate_condition_tree(condition: Condition) -> Condition:
+    """Validate the regular expressions of a condition tree.
+
+    Called when a rule or a campaign is saved. Stored conditions are not
+    re-validated on read, so a legacy pattern stays usable (and simply
+    never matches) instead of breaking the whole rule set.
+    """
+    if isinstance(condition, ConditionLeaf):
+        if condition.operator == "regex":
+            if not isinstance(condition.value, str):
+                raise ValueError("A regex condition requires a string value.")
+            validate_regex_pattern(condition.value)
+    elif isinstance(condition, ConditionGroup):
+        for child in condition.children:
+            validate_condition_tree(child)
+    elif isinstance(condition, ConditionNot):
+        validate_condition_tree(condition.child)
+    return condition
+
+
+@lru_cache(maxsize=1024)
+def parse_conditions(raw: str) -> Condition:
+    """Parse and validate a serialized condition tree.
+
+    The result is cached: the rule engine evaluates the conditions of a
+    tenant for every incoming mail, and re-validating the same tree over
+    and over again would dominate the processing time.
+    """
+    return _condition_adapter.validate_json(raw)

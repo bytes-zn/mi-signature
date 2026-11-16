@@ -33,10 +33,18 @@ COPY --from=builder /app/migrations /app/migrations
 COPY --from=builder /app/alembic.ini /app/alembic.ini
 
 ENV PATH="/app/.venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
 USER app
 
 EXPOSE 8000
+
+# Stop gracefully: the SMTP server and the API shut down their listeners on
+# SIGTERM instead of dropping open connections.
+STOPSIGNAL SIGTERM
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status in (200,503) else 1)"]
 
 CMD ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

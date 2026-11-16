@@ -11,22 +11,31 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import signal
 import ssl
 import threading
+from email import policy as email_policy
+from email.parser import BytesParser
 
 import structlog
 from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import SMTP as SMTPServer
 from aiosmtpd.smtp import Envelope
 from aiosmtpd.smtp import Session as SMTPSession
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.config.settings import Settings, get_settings
 from app.core.exceptions import AppError, ForbiddenError
 from app.database.session import build_engine, build_session_factory
 from app.logging.setup import configure_logging
 from app.mailer.service import MailProcessingService, SkipMessage
-from app.mailer.smtp_client import send_processed_mail, send_raw_message
+from app.mailer.smtp_client import (
+    DeliveryDeferred,
+    DeliveryRejected,
+    DeliveryUncertain,
+    send_processed_mail,
+    send_raw_message,
+)
 from app.models.tenant import Tenant
 from app.tenants.repository import TenantRepository
 
@@ -46,6 +55,21 @@ def strip_auth_param(arg: str) -> str:
     implemented`` - so the parameter is dropped before parsing.
     """
     return _AUTH_PARAM.sub("", arg)
+
+
+def has_processed_header(raw: bytes, header_name: str) -> bool:
+    """True when the top-level headers of the message carry the marker.
+
+    Only the headers are inspected. A byte search over the whole message
+    would also match a quoted or forwarded mail in the body and would drop
+    that message silently.
+    """
+    try:
+        message = BytesParser(policy=email_policy.default).parsebytes(raw)
+    except Exception:  # noqa: BLE001 - broken message, do not drop it
+        logger.warning("smtp message could not be parsed, skipping loop check")
+        return False
+    return any(name.lower() == header_name.lower() for name in message.keys())
 
 
 class TolerantSMTP(SMTPServer):
@@ -70,9 +94,9 @@ class SignatureSMTPHandler:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._engine: AsyncEngine | None = None
-        self._session_factory: async_sessionmaker | None = None
+        self._session_factory: async_sessionmaker[AsyncSession] | None = None
 
-    def _sessions(self) -> async_sessionmaker:
+    def _sessions(self) -> async_sessionmaker[AsyncSession]:
         """Lazy engine/session factory (bound to the SMTP worker thread's loop)."""
         if self._session_factory is None:
             self._engine = build_engine(self._settings)
@@ -111,7 +135,7 @@ class SignatureSMTPHandler:
         envelope: Envelope,
     ) -> str:
         peer = self._peer_host(session)
-        mail_from = envelope.mail_from.lower()
+        mail_from = (envelope.mail_from or "").lower()
         try:
             self._check_allowed_host(peer)
             if self._is_local_delivery(envelope):
@@ -126,8 +150,14 @@ class SignatureSMTPHandler:
                 )
                 return "250 OK"
 
-            raw = envelope.content
-            if self._settings.smtp_processed_header.lower().encode() in raw.lower():
+            content = envelope.content
+            if not isinstance(content, bytes):
+                # The server runs with decode_data=False, so the content is
+                # always raw bytes. Anything else cannot be relayed.
+                logger.error("smtp message content is not raw data", peer=peer, sender=mail_from)
+                return "451 Temporary local problem, please try later"
+            raw = content
+            if has_processed_header(raw, self._settings.smtp_processed_header):
                 # Loop protection: an already-signed message must never be
                 # processed again. Dropping breaks the loop.
                 logger.info("smtp message already processed, dropping", peer=peer, sender=mail_from)
@@ -161,6 +191,33 @@ class SignatureSMTPHandler:
                         peer=peer,
                         sender=mail_from,
                         reason=str(exc),
+                    )
+                except DeliveryUncertain as exc:
+                    # The message may already have been accepted by Exchange.
+                    # Relaying the original as well would deliver it twice.
+                    logger.warning(
+                        "smtp delivery outcome uncertain, requesting retry",
+                        peer=peer,
+                        sender=mail_from,
+                        error=str(exc),
+                    )
+                    return "451 Temporary local problem, please try later"
+                except DeliveryDeferred as exc:
+                    logger.warning(
+                        "smtp delivery deferred, requesting retry",
+                        peer=peer,
+                        sender=mail_from,
+                        error=str(exc),
+                    )
+                    return "451 Temporary local problem, please try later"
+                except DeliveryRejected as exc:
+                    # The signed copy was refused (e.g. too large). The
+                    # original may still be accepted.
+                    logger.warning(
+                        "smtp signed mail rejected, relaying original",
+                        peer=peer,
+                        sender=mail_from,
+                        error=str(exc),
                     )
                 except Exception:
                     logger.exception(
@@ -197,6 +254,30 @@ class SignatureSMTPHandler:
                 error=exc.message,
             )
             return f"550 {exc.message}"
+        except DeliveryUncertain as exc:
+            logger.warning(
+                "smtp delivery outcome uncertain, requesting retry",
+                peer=peer,
+                sender=mail_from,
+                error=str(exc),
+            )
+            return "451 Temporary local problem, please try later"
+        except DeliveryDeferred as exc:
+            logger.warning(
+                "smtp delivery deferred, requesting retry",
+                peer=peer,
+                sender=mail_from,
+                error=str(exc),
+            )
+            return "451 Temporary local problem, please try later"
+        except DeliveryRejected as exc:
+            logger.warning(
+                "smtp message rejected by the receiving server",
+                peer=peer,
+                sender=mail_from,
+                error=str(exc),
+            )
+            return "550 Message rejected by the receiving server"
         except Exception:
             logger.exception("smtp unexpected processing error", peer=peer, sender=mail_from)
             return "451 Temporary local problem, please try later"
@@ -214,9 +295,7 @@ class SignatureSMTPHandler:
         if not relay:
             return False
         relay = relay.lower()
-        return any(
-            "@" in rcpt and rcpt.split("@", 1)[1] == relay for rcpt in envelope.rcpt_tos
-        )
+        return any("@" in rcpt and rcpt.split("@", 1)[1] == relay for rcpt in envelope.rcpt_tos)
 
     def _check_allowed_host(self, peer: str) -> None:
         configured = self._settings.smtp_allowed_hosts
@@ -294,9 +373,25 @@ def main() -> None:
     )
 
     # The controller runs its own event loop in a worker thread; the main
-    # thread only needs to stay alive until interrupted.
+    # thread only needs to stay alive until interrupted. SIGTERM is handled
+    # explicitly so that a container stop closes the listener gracefully
+    # instead of killing the process mid-transaction.
+    stop_event = threading.Event()
+
+    def _request_stop(signum: int, frame: object) -> None:  # noqa: ANN001, ARG001
+        logger.info("smtp shutdown requested", signal=signum)
+        stop_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _request_stop)
+        except (ValueError, OSError):
+            # Not the main thread (e.g. under a test runner) - ignore.
+            pass
+
     try:
-        threading.Event().wait()
+        while not stop_event.wait(timeout=1.0):
+            pass
     except KeyboardInterrupt:
         pass
     finally:

@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_session
+from app.audit.dependencies import AuditDep
 from app.auth.api_key import Caller, get_caller
 from app.core.exceptions import ValidationError
 from app.core.user_context import UserContext
@@ -46,11 +47,20 @@ def _scope_for_write(caller: Caller, tenant_id: uuid.UUID | None) -> uuid.UUID:
 
 @router.post("", response_model=TemplateRead, status_code=status.HTTP_201_CREATED)
 async def create_template(
-    data: TemplateCreate, caller: CallerDep, service: ServiceDep
+    data: TemplateCreate, caller: CallerDep, service: ServiceDep, audit: AuditDep
 ) -> TemplateRead:
     """Create a template. Bodies are validated against the user contract."""
     tenant_id = _scope_for_write(caller, data.tenant_id)
     template = await service.create_template(tenant_id, data)
+    await audit.record(
+        "template.created",
+        actor_type=caller.actor_type,
+        actor_id=caller.actor_id,
+        tenant_id=tenant_id,
+        target_type="template",
+        target_id=str(template.id),
+        details={"name": template.name},
+    )
     return TemplateRead.model_validate(template)
 
 
@@ -79,21 +89,42 @@ async def get_template(
 
 @router.put("/{template_id}", response_model=TemplateRead)
 async def update_template(
-    template_id: uuid.UUID, data: TemplateUpdate, caller: CallerDep, service: ServiceDep
+    template_id: uuid.UUID,
+    data: TemplateUpdate,
+    caller: CallerDep,
+    service: ServiceDep,
+    audit: AuditDep,
 ) -> TemplateRead:
     template = await service.get_template(template_id)
     caller.ensure_tenant_access(template.tenant_id)
     updated = await service.update_template(template.tenant_id, template_id, data)
+    await audit.record(
+        "template.updated",
+        actor_type=caller.actor_type,
+        actor_id=caller.actor_id,
+        tenant_id=template.tenant_id,
+        target_type="template",
+        target_id=str(template_id),
+        details={"fields": sorted(data.model_dump(exclude_none=True).keys())},
+    )
     return TemplateRead.model_validate(updated)
 
 
 @router.delete("/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_template(
-    template_id: uuid.UUID, caller: CallerDep, service: ServiceDep
+    template_id: uuid.UUID, caller: CallerDep, service: ServiceDep, audit: AuditDep
 ) -> Response:
     template = await service.get_template(template_id)
     caller.ensure_tenant_access(template.tenant_id)
     await service.delete_template(template.tenant_id, template_id)
+    await audit.record(
+        "template.deleted",
+        actor_type=caller.actor_type,
+        actor_id=caller.actor_id,
+        tenant_id=template.tenant_id,
+        target_type="template",
+        target_id=str(template_id),
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

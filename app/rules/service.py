@@ -1,5 +1,6 @@
 """Rule service: business logic for tenant-scoped signature rules."""
 
+import json
 import uuid
 from collections.abc import Sequence
 from typing import Any
@@ -10,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.user_context import UserContext
 from app.models.rule import Rule
-from app.rules.conditions import Condition
+from app.rules.conditions import Condition, parse_conditions
 from app.rules.engine import evaluate
 from app.rules.repository import RuleRepository
 from app.rules.schemas import RuleCreate, RuleUpdate
@@ -98,7 +99,7 @@ class RuleService:
         """Return the highest-priority active rule matching the user, if any."""
         rules = await self._rules.list_active_for_tenant(tenant_id)
         for rule in rules:
-            condition = _condition_adapter.validate_python(rule.conditions)
+            condition = parse_conditions(json.dumps(rule.conditions, sort_keys=True))
             if evaluate(condition, user):
                 return rule
         return None

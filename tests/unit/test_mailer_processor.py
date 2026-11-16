@@ -127,7 +127,7 @@ def test_append_signature_html_before_blockquote() -> None:
 
 def test_append_signature_html_before_outlook_reference_container() -> None:
     body = (
-        '<html><body><div>Neu</div>'
+        "<html><body><div>Neu</div>"
         '<div id="mail-editor-reference-message-container"><div>Verlauf</div></div>'
         "</body></html>"
     )

@@ -13,9 +13,11 @@ MIME -> JSON mapping with the signature injected, not MIME reserialization.
 import base64
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from email import policy
+from email.message import Message
 from email.parser import BytesParser
-from email.utils import getaddresses, parseaddr
+from email.utils import format_datetime, getaddresses, parseaddr, parsedate_to_datetime
 from typing import Any
 
 
@@ -47,12 +49,34 @@ class ProcessedMail:
     attachments: list[Attachment] = field(default_factory=list)
     message_id: str | None = None
     reply_to: list[str] = field(default_factory=list)
+    date: str | None = None
+    headers: list[tuple[str, str]] = field(default_factory=list)
 
 
 def _collect_addresses(header_value: str | None) -> list[str]:
     if not header_value:
         return []
     return [addr for _, addr in getaddresses([header_value]) if addr]
+
+
+def _normalize_date(value: Any) -> str | None:
+    """Return the original ``Date`` header as an RFC 5322 date string.
+
+    Invalid dates are dropped so that the rebuilt message always carries a
+    parsable timestamp.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return format_datetime(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    return text
 
 
 # Markers that indicate the beginning of quoted reply/forward content in
@@ -155,6 +179,51 @@ def append_signature_text(text_body: str, signature_text: str) -> str:
     return text_body + separator + signature_text
 
 
+#: Headers that are rebuilt by the delivery layer or that must never be
+#: copied from the original message: envelope/hop headers, trace headers,
+#: the signature of the original DKIM (invalid after the body was changed)
+#: and the marker header of this platform (loop protection).
+_REBUILT_HEADERS = frozenset(
+    {
+        "from",
+        "to",
+        "cc",
+        "bcc",
+        "subject",
+        "date",
+        "message-id",
+        "reply-to",
+        "mime-version",
+        "content-type",
+        "content-transfer-encoding",
+        "content-disposition",
+        "content-id",
+        "content-length",
+        "received",
+        "return-path",
+        "dkim-signature",
+        "arc-seal",
+        "arc-message-signature",
+        "arc-authentication-results",
+        "authentication-results",
+        "x-bytes-signature-processed",
+    }
+)
+
+
+def _collect_headers(message: Message) -> list[tuple[str, str]]:
+    """Collect the original top-level headers that must survive the rebuild.
+
+    Threading headers (``In-Reply-To``, ``References``) and custom ``X-*``
+    headers are kept so that the signed copy behaves like the original.
+    """
+    return [
+        (name, str(value))
+        for name, value in message.items()
+        if name.lower() not in _REBUILT_HEADERS
+    ]
+
+
 def process_mime(raw: bytes, signature_html: str, signature_text: str) -> ProcessedMail:
     """Parse a raw MIME message and append the signature to its bodies.
 
@@ -175,6 +244,8 @@ def process_mime(raw: bytes, signature_html: str, signature_text: str) -> Proces
         bcc=[a.lower() for a in _collect_addresses(message.get("Bcc"))],
         message_id=message.get("Message-ID"),
         reply_to=[a.lower() for a in _collect_addresses(message.get("Reply-To"))],
+        date=_normalize_date(message.get("Date")),
+        headers=_collect_headers(message),
     )
 
     for part in message.walk():

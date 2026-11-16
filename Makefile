@@ -1,4 +1,4 @@
-.PHONY: up down build migrate logs test test-integration lint format check sync lock
+.PHONY: up down build migrate logs test test-integration lint format check sync lock secrets prod-up prod-down prod-config
 
 # --- Docker ---
 up:
@@ -16,12 +16,26 @@ migrate:
 logs:
 	docker compose logs -f
 
+# Production stack (adds the production baseline, see docker-compose.prod.yml)
+prod-up:
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+
+prod-down:
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml down
+
+prod-config:
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml config
+
 # --- Local development (uv) ---
 sync:
 	uv sync
 
 lock:
 	uv lock
+
+# Print the secrets required for a production deployment.
+secrets:
+	uv run python scripts/generate_secrets.py
 
 test:
 	uv run pytest

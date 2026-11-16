@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras --dev
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Black
+        run: uv run black --check .
+      - name: isort
+        run: uv run isort --check .
+      - name: Mypy
+        run: uv run mypy app
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras --dev
+      - name: Unit and API tests
+        run: uv run pytest tests/unit tests/api
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: signature
+          POSTGRES_PASSWORD: signature
+          POSTGRES_DB: signature
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U signature -d signature"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ENVIRONMENT: test
+      RUN_INTEGRATION_TESTS: "1"
+      DATABASE_URL: postgresql+asyncpg://signature:signature@localhost:5432/signature
+      REDIS_URL: redis://localhost:6379/0
+      OPERATOR_API_KEY: ci-operator-key-that-is-long-enough-000000
+      SECRET_ENCRYPTION_KEY: Y2l0ZXN0LWNpcGhlci1rZXktZm9yLXVuaXQtdGVzdHMtb25seQ==
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras --dev
+      - name: Run migrations
+        run: uv run alembic upgrade head
+      - name: Integration tests
+        run: uv run pytest tests/integration
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras --dev
+      - name: Dependency audit
+        run: uv run --with pip-audit pip-audit
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t bytes-signature-service:ci .

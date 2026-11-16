@@ -13,6 +13,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
+from app.models.types import EncryptedString
 
 if TYPE_CHECKING:
     from app.models.api_key import ApiKey
@@ -32,7 +33,7 @@ class Tenant(Base):
     # Microsoft 365 / Entra ID connection
     microsoft_tenant_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     entra_client_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    entra_client_secret: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    entra_client_secret: Mapped[str | None] = mapped_column(EncryptedString(512), nullable=True)
 
     # License information
     license_plan: Mapped[str | None] = mapped_column(String(100), nullable=True)

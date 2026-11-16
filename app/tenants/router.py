@@ -4,6 +4,8 @@ No business logic here - every endpoint delegates to the TenantService.
 Access rules:
 - Create/list/delete tenants: operator only.
 - Read/update a tenant, manage its API keys: operator or the tenant itself.
+
+Every mutating action is written to the audit trail.
 """
 
 import uuid
@@ -13,6 +15,7 @@ from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_session
+from app.audit.dependencies import AuditDep
 from app.auth.api_key import Caller, get_caller, require_operator
 from app.tenants.schemas import (
     ApiKeyCreate,
@@ -44,9 +47,23 @@ CallerDep = Annotated[Caller, Depends(get_caller)]
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require_operator)],
 )
-async def create_tenant(data: TenantCreate, service: ServiceDep) -> TenantCreated:
+async def create_tenant(
+    data: TenantCreate,
+    service: ServiceDep,
+    caller: CallerDep,
+    audit: AuditDep,
+) -> TenantCreated:
     """Create a tenant (operator only). Returns the initial API key once."""
     tenant, plaintext_key = await service.create_tenant(data)
+    await audit.record(
+        "tenant.created",
+        actor_type=caller.actor_type,
+        actor_id=caller.actor_id,
+        tenant_id=tenant.id,
+        target_type="tenant",
+        target_id=str(tenant.id),
+        details={"name": tenant.name},
+    )
     return TenantCreated(tenant=TenantRead.model_validate(tenant), api_key=plaintext_key)
 
 
@@ -75,10 +92,20 @@ async def update_tenant(
     data: TenantUpdate,
     caller: CallerDep,
     service: ServiceDep,
+    audit: AuditDep,
 ) -> TenantRead:
     """Update a tenant (operator or the tenant itself)."""
     caller.ensure_tenant_access(tenant_id)
     tenant = await service.update_tenant(tenant_id, data)
+    await audit.record(
+        "tenant.updated",
+        actor_type=caller.actor_type,
+        actor_id=caller.actor_id,
+        tenant_id=tenant_id,
+        target_type="tenant",
+        target_id=str(tenant_id),
+        details={"fields": sorted(data.model_dump(exclude_none=True).keys())},
+    )
     return TenantRead.model_validate(tenant)
 
 
@@ -87,9 +114,22 @@ async def update_tenant(
     status_code=status.HTTP_204_NO_CONTENT,
     dependencies=[Depends(require_operator)],
 )
-async def delete_tenant(tenant_id: uuid.UUID, service: ServiceDep) -> Response:
+async def delete_tenant(
+    tenant_id: uuid.UUID,
+    service: ServiceDep,
+    caller: CallerDep,
+    audit: AuditDep,
+) -> Response:
     """Delete a tenant including its API keys (operator only)."""
     await service.delete_tenant(tenant_id)
+    await audit.record(
+        "tenant.deleted",
+        actor_type=caller.actor_type,
+        actor_id=caller.actor_id,
+        tenant_id=tenant_id,
+        target_type="tenant",
+        target_id=str(tenant_id),
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -103,10 +143,20 @@ async def create_api_key(
     data: ApiKeyCreate,
     caller: CallerDep,
     service: ServiceDep,
+    audit: AuditDep,
 ) -> ApiKeyCreated:
     """Create an additional API key. The plaintext key is returned once."""
     caller.ensure_tenant_access(tenant_id)
     api_key, plaintext_key = await service.create_api_key(tenant_id, data)
+    await audit.record(
+        "api_key.created",
+        actor_type=caller.actor_type,
+        actor_id=caller.actor_id,
+        tenant_id=tenant_id,
+        target_type="api_key",
+        target_id=str(api_key.id),
+        details={"name": data.name},
+    )
     return ApiKeyCreated(api_key=ApiKeyRead.model_validate(api_key), key=plaintext_key)
 
 
@@ -126,8 +176,17 @@ async def revoke_api_key(
     key_id: uuid.UUID,
     caller: CallerDep,
     service: ServiceDep,
+    audit: AuditDep,
 ) -> Response:
     """Revoke an API key."""
     caller.ensure_tenant_access(tenant_id)
     await service.revoke_api_key(tenant_id, key_id)
+    await audit.record(
+        "api_key.revoked",
+        actor_type=caller.actor_type,
+        actor_id=caller.actor_id,
+        tenant_id=tenant_id,
+        target_type="api_key",
+        target_id=str(key_id),
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

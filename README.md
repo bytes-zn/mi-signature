@@ -1,16 +1,19 @@
 # MI Signature (Bytes Signature Service)
 
-Open-source, self-hosted platform for **server-side email signatures in
-Microsoft 365** — an alternative to CodeTwo & Co., without client plugins and
-without Outlook rules. The mail flows through the **Exchange Online connectors**
-to your own server, where the signature and an optional campaign banner are
-appended, and then it is delivered back to M365.
+Self-hosted platform for **server-side email signatures in Microsoft 365** —
+an alternative to CodeTwo & Co., without client plugins and without Outlook
+rules. The mail flows through the **Exchange Online connectors** to your own
+server, where the signature and an optional campaign banner are appended,
+and then it is delivered back to M365.
 
 Pure REST API (no frontend), multi-tenant, clean architecture.
 
-**Status:** Production-ready. End-to-end tested:
-Outlook → M365 → Signature Server → M365 → external recipient, including
-reply-safe signature placement.
+**Status:** Feature-complete and hardened for production. The mail flow is
+end-to-end tested (Outlook → M365 → Signature Server → M365 → external
+recipient, including reply-safe signature placement). A production
+baseline (`ENVIRONMENT=production`) refuses to start with an insecure
+configuration - see [Production readiness](#production-readiness) and the
+[operations runbook](docs/operations/runbook.md).
 
 ## How It Works
 
@@ -88,11 +91,12 @@ app/
 ├── api/            # Router + dependency injection (no business logic)
 │   ├── ops.py      #   /health, /metrics (unversioned)
 │   └── v1/         #   versioned business endpoints (/api/v1)
+├── audit/          # Audit trail for configuration changes
 ├── auth/           # API key auth (operator + tenant keys, SHA-256 hashes)
 ├── cache/          # Redis client
 ├── campaigns/      # Time-controlled banner campaigns
-├── config/         # pydantic-settings (environment-based)
-├── core/           # Exceptions, middleware, UserContext contract
+├── config/         # pydantic-settings (environment-based) + prod baseline
+├── core/           # Exceptions, middleware, crypto, UserContext contract
 ├── database/       # Engine/session factory, declarative base
 ├── graph/          # Entra ID sync (client, mapper, service)
 ├── jobs/           # Celery app + tasks
@@ -106,7 +110,44 @@ app/
 migrations/         # Alembic migrations
 tests/              # unit / api / integration
 docs/architecture/  # ADRs (architecture decision records)
+docs/operations/    # Runbook: deployment, backup, monitoring, incidents
 ```
+
+## Production readiness
+
+The platform ships with a **production baseline**: with
+`ENVIRONMENT=production` the application refuses to start when the
+configuration would be unsafe. It validates that
+
+- `OPERATOR_API_KEY` is not the well-known default and is at least 32
+  characters long,
+- `SECRET_ENCRYPTION_KEY` is set (tenant secrets are encrypted at rest),
+- `SMTP_ALLOWED_HOSTS` is set (otherwise the relay would be an open relay),
+- `SMTP_INBOUND_REQUIRE_TLS` and `SMTP_OUTBOUND_TLS_VERIFY` are enabled,
+- `DEBUG` is off,
+- the SMTP listener has a certificate and a relay hostname.
+
+Hardening that is active in every environment:
+
+| Area | Measure |
+|---|---|
+| Secrets at rest | Tenant credentials are encrypted (`enc:v1:` ciphertext, HMAC-SHA256 counter mode + encrypt-then-MAC); the master key never leaves the environment |
+| Authentication | 256-bit API keys, SHA-256 hashes at rest, constant-time comparison, expiry and revocation, `last_used_at` written at most every 5 minutes |
+| API | Request body limit (413), per-client token-bucket rate limit (429), `Host` header allow-list, optional HTTPS redirect, optional token for `/metrics`, optional OpenAPI docs |
+| Templates | Jinja2 sandbox without the heavy globals (`range`, `lipsum`), unknown variables rejected at save time, render output bounded |
+| Rules | Regular expressions are validated when they are saved (length limit, no nested quantifiers - no ReDoS in the mail path) |
+| Audit trail | Every mutating operation (tenant, API key, template, rule, campaign) is recorded in `audit_logs` with actor, request id and source IP |
+| Mail flow | Loop protection inspects the real header (never the body), threading headers survive the rebuild, header values are sanitized against header injection, delivery failures are classified so that a message is never delivered twice |
+| Availability | Fail-safe pass-through, restart policies and health checks for every container, log rotation, graceful SIGTERM shutdown, cached templates and rule trees |
+
+```bash
+make secrets      # generate OPERATOR_API_KEY, SECRET_ENCRYPTION_KEY, ...
+make prod-up      # start with the production baseline
+```
+
+The full procedure - deployment, backup and restore, key rotation,
+monitoring, incident handling - is documented in
+[docs/operations/runbook.md](docs/operations/runbook.md).
 
 ## Production Setup (VPS + Microsoft 365)
 
@@ -279,7 +320,10 @@ fields do not produce blank lines.
   no open relay; mails to the relay hostname itself are discarded
   (connector validation)
 - Tenant API keys stored as SHA-256 hashes, plaintext visible only once
-- Jinja2 sandbox, no HTML escaping needed (signature HTML is admin input)
+- Tenant credentials (Entra client secret) encrypted at rest
+- Jinja2 sandbox without CPU-heavy globals, no HTML escaping needed
+  (signature HTML is admin input)
+- Audit trail for all configuration changes
 - Secrets exclusively via environment variables
 
 ## Tests & Code Quality
@@ -292,14 +336,18 @@ make lint              # ruff + black --check + isort --check + mypy (strict)
 make format            # ruff --fix + black + isort
 ```
 
+CI (`.github/workflows/ci.yml`) runs lint, unit and API tests, integration
+tests against PostgreSQL/Redis, a dependency audit (`pip-audit`) and the
+Docker build on every push.
+
 ## Roadmap
 
 - DKIM signing on the return path
-- Automatic Graph sync via Celery Beat (service setup)
 - CID logos, QR codes, disclaimer blocks, banner rotation
 - Management UI
-- Multi-tenant scaling: queueing with persistent retries
+- Multi-tenant scaling: persistent queue for the outbound delivery
+- Domain lookup via a JSONB index instead of loading all tenants per mail
 
 ## License
 
-See `LICENSE` or `pyproject.toml`.
+See `pyproject.toml` for the license terms.
